@@ -20,14 +20,20 @@
 
     <div class="max-w-7xl mx-auto">
         <!-- 헤더 -->
-        <header class="mb-8 flex justify-between items-end">
+        <header class="mb-8 flex flex-col md:flex-row justify-between items-start md:items-end gap-4">
             <div>
                 <h1 class="text-3xl font-bold text-gray-900">우리 동네 아파트 실거래가 대시보드</h1>
                 <p class="text-gray-500 mt-2 text-sm">구글 시트 데이터 연동 실시간 현황</p>
             </div>
-            <div id="loading" class="flex items-center space-x-2 text-blue-600 font-medium">
-                <div class="spinner"></div>
-                <span>데이터를 불러오는 중...</span>
+            <div class="flex items-center gap-4">
+                <!-- 법정동 필터 드롭다운 (초기엔 숨김 처리) -->
+                <select id="dong-filter" class="hidden bg-white border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2.5 shadow-sm outline-none">
+                    <option value="all">전체 법정동</option>
+                </select>
+                <div id="loading" class="flex items-center space-x-2 text-blue-600 font-medium">
+                    <div class="spinner"></div>
+                    <span id="loading-text">데이터를 불러오는 중...</span>
+                </div>
             </div>
         </header>
 
@@ -92,6 +98,10 @@
     <script>
         const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRsQTSvBoCtdX7h6nfa4_JCGgwFom5lC4g2xXJWovyuffM6zFOfgQOpjKvNcK_tEmMyNS8CzPRkWdQ4/pub?gid=1375322304&single=true&output=csv';
 
+        // 전역 상태 변수
+        let globalRawData = []; 
+        let priceChartInstance = null;
+
         document.addEventListener('DOMContentLoaded', () => {
             fetchData();
         });
@@ -104,12 +114,25 @@
                 
                 const csvText = await response.text();
                 
-                // PapaParse를 이용한 CSV 파싱
                 Papa.parse(csvText, {
-                    header: true, // 첫 줄을 키값으로 사용
+                    header: true,
                     skipEmptyLines: true,
                     complete: function(results) {
-                        processData(results.data);
+                        globalRawData = results.data;
+                        
+                        if (globalRawData.length === 0) {
+                            document.getElementById('loading').innerHTML = '<span class="text-red-500">데이터가 없습니다.</span>';
+                            return;
+                        }
+
+                        initFilter(globalRawData);
+                        updateDashboard(globalRawData);
+
+                        // 로딩 숨기고 화면 표시 및 필터 활성화
+                        document.getElementById('loading').style.display = 'none';
+                        document.getElementById('dong-filter').classList.remove('hidden');
+                        document.getElementById('summary-cards').style.display = 'grid';
+                        document.getElementById('main-content').style.display = 'grid';
                     },
                     error: function(error) {
                         console.error('CSV 파싱 에러:', error);
@@ -122,13 +145,45 @@
             }
         }
 
-        // 2. 데이터 가공 및 렌더링
-        function processData(data) {
-            if (!data || data.length === 0) {
-                document.getElementById('loading').innerHTML = '<span class="text-red-500">데이터가 없습니다.</span>';
-                return;
-            }
+        // 2. 법정동 필터 초기화 및 이벤트 등록
+        function initFilter(data) {
+            const dongSet = new Set();
+            
+            data.forEach(row => {
+                const keys = Object.keys(row);
+                const dong = row['법정동'] || row[keys.find(k => k.includes('법정동'))];
+                if (dong && dong.trim() !== '') {
+                    dongSet.add(dong.trim());
+                }
+            });
 
+            const select = document.getElementById('dong-filter');
+            // 가나다 순으로 정렬하여 옵션 추가
+            Array.from(dongSet).sort().forEach(dong => {
+                const option = document.createElement('option');
+                option.value = dong;
+                option.textContent = dong;
+                select.appendChild(option);
+            });
+
+            // 필터 변경 이벤트 처리
+            select.addEventListener('change', (e) => {
+                const selectedDong = e.target.value;
+                if (selectedDong === 'all') {
+                    updateDashboard(globalRawData);
+                } else {
+                    const filteredData = globalRawData.filter(row => {
+                        const keys = Object.keys(row);
+                        const dong = row['법정동'] || row[keys.find(k => k.includes('법정동'))];
+                        return dong && dong.trim() === selectedDong;
+                    });
+                    updateDashboard(filteredData);
+                }
+            });
+        }
+
+        // 3. 대시보드 데이터 가공 및 전체 UI 업데이트 로직
+        function updateDashboard(data) {
             let totalCount = 0;
             let sumPrice = 0;
             let maxPrice = -Infinity;
@@ -138,7 +193,6 @@
             const cleanData = [];
 
             data.forEach(row => {
-                // 키값이 정확히 매칭되는지 유연하게 처리 (공백 등 제거)
                 const keys = Object.keys(row);
                 const getDate = () => row['거래일자'] || row[keys.find(k => k.includes('거래일자'))];
                 const getName = () => row['아파트명'] || row[keys.find(k => k.includes('아파트명'))];
@@ -151,20 +205,16 @@
                 const dateStr = getDate();
                 const priceStr = getPrice();
 
-                if (!dateStr || !priceStr) return; // 필수 데이터 누락 시 스킵
+                if (!dateStr || !priceStr) return; 
 
-                // 금액 숫자 변환 (콤마 제거)
                 const price = parseInt(priceStr.toString().replace(/,/g, ''), 10);
                 if (isNaN(price)) return;
 
-                // 통계 계산
                 totalCount++;
                 sumPrice += price;
                 if (price > maxPrice) maxPrice = price;
                 if (price < minPrice) minPrice = price;
 
-                // 월별 집계 로직 (YYYY-MM 추출)
-                // 거래일자 포맷이 다양할 수 있으므로, 숫자만 남기고 연/월 분리 시도
                 const rawDate = dateStr.replace(/[^0-9]/g, ''); 
                 let yearMonth = 'Unknown';
                 if (rawDate.length >= 6) {
@@ -177,7 +227,6 @@
                 monthlyData[yearMonth].sum += price;
                 monthlyData[yearMonth].count += 1;
 
-                // 테이블 렌더링용 정제 데이터 저장
                 cleanData.push({
                     date: dateStr,
                     name: getName() || '-',
@@ -189,29 +238,25 @@
                 });
             });
 
-            // UI 업데이트
-            const avgPrice = Math.round(sumPrice / totalCount);
+            // 필터 결과가 없을 경우 방어 로직
+            const avgPrice = totalCount > 0 ? Math.round(sumPrice / totalCount) : 0;
+            const finalMaxPrice = maxPrice !== -Infinity ? maxPrice : 0;
+            const finalMinPrice = minPrice !== Infinity ? minPrice : 0;
             
-            // 숫자에 콤마 찍는 포맷터
             const fmt = (num) => new Intl.NumberFormat('ko-KR').format(num);
 
+            // 요약 지표 업데이트
             document.getElementById('val-count').innerHTML = `${fmt(totalCount)}<span class="text-base font-normal text-gray-500 ml-1">건</span>`;
             document.getElementById('val-avg').innerHTML = `${fmt(avgPrice)}<span class="text-base font-normal text-gray-500 ml-1">만원</span>`;
-            document.getElementById('val-max').innerHTML = `${fmt(maxPrice !== -Infinity ? maxPrice : 0)}<span class="text-base font-normal text-gray-500 ml-1">만원</span>`;
-            document.getElementById('val-min').innerHTML = `${fmt(minPrice !== Infinity ? minPrice : 0)}<span class="text-base font-normal text-gray-500 ml-1">만원</span>`;
+            document.getElementById('val-max').innerHTML = `${fmt(finalMaxPrice)}<span class="text-base font-normal text-gray-500 ml-1">만원</span>`;
+            document.getElementById('val-min').innerHTML = `${fmt(finalMinPrice)}<span class="text-base font-normal text-gray-500 ml-1">만원</span>`;
 
             renderChart(monthlyData);
             renderTable(cleanData);
-
-            // 로딩 숨기고 화면 표시
-            document.getElementById('loading').style.display = 'none';
-            document.getElementById('summary-cards').style.display = 'grid';
-            document.getElementById('main-content').style.display = 'grid';
         }
 
-        // 3. 차트 렌더링
+        // 4. 차트 렌더링 (인스턴스 파괴 로직 추가)
         function renderChart(monthlyData) {
-            // 시간순 정렬
             const sortedMonths = Object.keys(monthlyData).sort();
             const labels = sortedMonths;
             const dataPoints = sortedMonths.map(month => {
@@ -219,7 +264,13 @@
             });
 
             const ctx = document.getElementById('priceChart').getContext('2d');
-            new Chart(ctx, {
+            
+            // 기존 차트가 존재하면 파괴 (메모리 누수 및 차트 겹침 현상 방지)
+            if (priceChartInstance) {
+                priceChartInstance.destroy();
+            }
+
+            priceChartInstance = new Chart(ctx, {
                 type: 'line',
                 data: {
                     labels: labels,
@@ -264,15 +315,19 @@
             });
         }
 
-        // 4. 테이블 렌더링
+        // 5. 테이블 렌더링
         function renderTable(data) {
             const tbody = document.getElementById('table-body');
             tbody.innerHTML = '';
 
-            // 최신 거래일자 순으로 정렬 (간단히 문자열 역순 정렬)
+            if (data.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" class="px-6 py-8 text-center text-gray-500">해당 조건의 거래 내역이 없습니다.</td></tr>';
+                return;
+            }
+
             data.sort((a, b) => b.date.localeCompare(a.date));
 
-            data.forEach((row, index) => {
+            data.forEach(row => {
                 const tr = document.createElement('tr');
                 tr.className = 'bg-white border-b hover:bg-gray-50';
                 
